@@ -102,6 +102,25 @@ export class AnnotationStore {
     }
   }
 
+  updateNotePath(id: string, notePath: string): void {
+    for (const arr of Object.values(this.data.highlights)) {
+      const h = arr.find((h) => h.id === id);
+      if (h) {
+        h.notePath = notePath || undefined;
+        this.scheduleSave();
+        return;
+      }
+    }
+  }
+
+  getById(id: string): Highlight | undefined {
+    for (const arr of Object.values(this.data.highlights)) {
+      const h = arr.find((h) => h.id === id);
+      if (h) return h;
+    }
+    return undefined;
+  }
+
   getAllHighlights(): Highlight[] {
     const all: Highlight[] = [];
     for (const arr of Object.values(this.data.highlights)) {
@@ -132,6 +151,20 @@ export class AnnotationStore {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+  }
+
+  /** Update notePath references when a note file is renamed */
+  renameNoteFile(oldNotePath: string, newNotePath: string): void {
+    let changed = false;
+    for (const arr of Object.values(this.data.highlights)) {
+      for (const h of arr) {
+        if (h.notePath === oldNotePath) {
+          h.notePath = newNotePath;
+          changed = true;
+        }
+      }
+    }
+    if (changed) this.scheduleSave();
   }
 
   renameFile(oldPath: string, newPath: string): void {

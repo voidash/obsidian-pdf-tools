@@ -678,6 +678,11 @@ export class AiSidebarView extends ItemView {
     // Save user message to store (store the raw text, not the context-enriched version)
     this.plugin.chatStore.addMessage(conv.id, { role: 'user', content: userText });
 
+    // Ensure local proxy is running before making the request
+    if (this.plugin.settings.provider === 'local-proxy' && this.plugin.proxyManager) {
+      await this.plugin.proxyManager.ensureRunning();
+    }
+
     const streamEl = this.createStreamingMessage();
     let accumulated = '';
 
@@ -823,7 +828,7 @@ export class AiSidebarView extends ItemView {
     const el = this.messagesEl.createDiv({ cls: 'pcai-tool-status' });
     el.createSpan({ cls: 'pcai-tool-icon', text: '\uD83D\uDD0D' });
     el.createSpan({ text: label });
-    this.scrollToBottom();
+    this.scrollToBottomIfNeeded();
   }
 
   private createStreamingMessage(): HTMLElement {
@@ -841,7 +846,7 @@ export class AiSidebarView extends ItemView {
     content.empty();
     this.renderMarkdown(content, fullText);
     content.createSpan({ cls: 'pcai-cursor' });
-    this.scrollToBottom();
+    this.scrollToBottomIfNeeded();
   }
 
   private finalizeStreamingMessage(msgEl: HTMLElement, fullText: string): void {
@@ -887,7 +892,21 @@ export class AiSidebarView extends ItemView {
     if (!active && !this.closed) this.inputEl.focus();
   }
 
+  /** Check if the user is scrolled near the bottom (within 80px). */
+  private isNearBottom(): boolean {
+    const el = this.messagesEl;
+    return el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+  }
+
+  /** Always scroll to the bottom (e.g. after user sends a message). */
   private scrollToBottom(): void {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+  }
+
+  /** Scroll to bottom only if the user hasn't scrolled up to read earlier content. */
+  private scrollToBottomIfNeeded(): void {
+    if (this.isNearBottom()) {
+      this.scrollToBottom();
+    }
   }
 }

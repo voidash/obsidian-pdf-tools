@@ -16,7 +16,14 @@ export class ProxyManager {
   private process: ChildProcess | null = null;
   private startAttempted = false;
 
-  constructor(private readonly baseUrl: string) {}
+  constructor(private baseUrl: string) {}
+
+  /** Reset state so ensureRunning() will attempt a fresh start. */
+  reset(baseUrl: string): void {
+    this.stop();
+    this.baseUrl = baseUrl;
+    this.startAttempted = false;
+  }
 
   async ensureRunning(): Promise<void> {
     if (await this.isRunning()) return;

@@ -539,6 +539,33 @@
 .pcai-markdown strong {
   font-weight: 600;
 }
+
+/* ── Math / LaTeX in assistant messages ──────────── */
+
+.pcai-markdown .math,
+.pcai-markdown mjx-container {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.pcai-markdown .math-block,
+.pcai-markdown mjx-container[jax="CHTML"][display="true"] {
+  display: block;
+  margin: 0.5em 0;
+  text-align: center;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 4px 0;
+}
+.pcai-markdown .math-inline,
+.pcai-markdown mjx-container:not([display="true"]) {
+  display: inline;
+  vertical-align: baseline;
+}
+.pcai-markdown .MathJax {
+  font-size: inherit !important;
+}
+
 /* ── Tool call status ─────────────────────────────── */
 
 .pcai-tool-status {
@@ -914,6 +941,19 @@
   font-style: italic;
   line-height: 1.35;
 }
+.pcai-anno-note-link {
+  cursor: pointer;
+  color: var(--text-accent);
+  font-style: normal;
+  text-decoration: none;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.pcai-anno-note-link:hover {
+  text-decoration: underline;
+  color: var(--text-accent-hover, var(--text-accent));
+}
 .pcai-anno-actions {
   display: flex;
   gap: 2px;
@@ -1279,6 +1319,107 @@
   object-fit: contain;
 }
 
+/* ── Canvas PDF page strip (bottom bar) ── */
+.pcai-canvas-strip {
+  position: absolute;
+  bottom: 0;
+  left: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: var(--background-primary);
+  border-top: 1px solid var(--background-modifier-border);
+  font-size: 11px;
+  color: var(--text-muted);
+  z-index: 10;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  pointer-events: none;
+}
+/*
+ * Only enable pointer-events on the strip when the PDF is in interactive mode.
+ * This prevents the strip from eating resize-handle events on the canvas node.
+ */
+.pcai-interactive .pcai-canvas-strip {
+  opacity: 1;
+  pointer-events: auto;
+}
+.pcai-strip-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 1px 4px;
+  font-size: 12px;
+  color: var(--text-muted);
+  border-radius: 3px;
+  line-height: 1;
+  pointer-events: inherit;
+}
+.pcai-strip-btn:hover {
+  background: var(--background-modifier-hover);
+  color: var(--text-normal);
+}
+.pcai-strip-page {
+  cursor: pointer;
+  padding: 1px 6px;
+  border-radius: 3px;
+  user-select: none;
+  pointer-events: inherit;
+}
+.pcai-strip-page:hover {
+  background: var(--background-modifier-hover);
+}
+.pcai-strip-input {
+  width: 48px;
+  padding: 1px 4px;
+  font-size: 11px;
+  text-align: center;
+  border: 1px solid var(--interactive-accent);
+  border-radius: 3px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  outline: none;
+}
+
+/* ── Canvas PDF outline panel ── */
+.pcai-canvas-outline {
+  position: absolute;
+  bottom: 24px;
+  left: 0;
+  width: 240px;
+  max-height: 60%;
+  overflow-y: auto;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  z-index: 15;
+  padding: 4px 0;
+  font-size: 12px;
+}
+/* Ensure hidden outline panel never intercepts pointer events */
+.pcai-canvas-outline.pcai-hidden {
+  pointer-events: none !important;
+}
+.pcai-outline-item {
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--text-normal);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.pcai-outline-item:hover {
+  background: var(--background-modifier-hover);
+}
+.pcai-outline-empty {
+  padding: 8px 12px;
+  color: var(--text-muted);
+  font-style: italic;
+}
+
 /* Interactive mode: content blocker disabled, subtle glow to indicate state */
 .pcai-interactive {
   outline: 2px solid var(--interactive-accent);
@@ -1329,6 +1470,75 @@
   color: var(--text-muted);
 }
 
+/* ── Page jump modal ──────────────────────────── */
+.pcai-page-jump-modal h3 {
+  margin: 0 0 16px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.pcai-page-jump-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
+}
+.pcai-page-jump-input {
+  width: 80px;
+  padding: 6px 8px;
+  font-size: 16px;
+  text-align: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+}
+.pcai-page-jump-input:focus {
+  border-color: var(--interactive-accent);
+  outline: none;
+}
+.pcai-page-jump-input.pcai-input-error {
+  border-color: var(--text-error);
+  animation: pcai-shake 0.3s ease;
+}
+.pcai-page-jump-total {
+  font-size: 14px;
+  color: var(--text-muted);
+}
+.pcai-page-jump-btn {
+  margin-left: auto;
+}
+@keyframes pcai-shake {
+  0%, 100% { transform: translateX(0); }
+  25% { transform: translateX(-4px); }
+  75% { transform: translateX(4px); }
+}
+
+/* ── Outline modal ────────────────────────────── */
+.pcai-outline-modal h3 {
+  margin: 0 0 12px;
+  font-size: 16px;
+  font-weight: 600;
+}
+.pcai-outline-modal-list {
+  max-height: 400px;
+  overflow-y: auto;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+}
+.pcai-outline-modal-item {
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+  color: var(--text-normal);
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.pcai-outline-modal-item:last-child {
+  border-bottom: none;
+}
+.pcai-outline-modal-item:hover {
+  background: var(--background-modifier-hover);
+  color: var(--interactive-accent);
+}
 
 /* ── PDF metadata display ──────────────────────── */
 
@@ -1465,4 +1675,32 @@
 }
 .pcai-no-pointer-events {
   pointer-events: none;
+}
+
+/* ── Page jump overlay (canvas PDF right-click → Go to page) ── */
+.pcai-page-jump {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  background: var(--background-primary);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  padding: 4px 8px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+.pcai-page-jump-input {
+  width: 60px;
+  padding: 2px 6px;
+  font-size: 13px;
+  text-align: center;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  background: var(--background-primary);
+  color: var(--text-normal);
+  outline: none;
+}
+.pcai-page-jump-input:focus {
+  border-color: var(--interactive-accent);
 }

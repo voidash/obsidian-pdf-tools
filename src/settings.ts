@@ -221,12 +221,13 @@ export class PdfCanvasAiSettingTab extends PluginSettingTab {
           dd.setValue(this.plugin.settings.provider);
           dd.onChange(async (value) => {
             const provider = value as AiProvider;
+            const prevProvider = this.plugin.settings.provider;
             this.plugin.settings.provider = provider;
             const defaults = PROVIDER_DEFAULTS[provider];
-            if (!this.plugin.settings.baseUrl || this.plugin.settings.baseUrl === PROVIDER_DEFAULTS[this.previousProvider() ?? 'local-proxy'].baseUrl) {
+            if (!this.plugin.settings.baseUrl || this.plugin.settings.baseUrl === PROVIDER_DEFAULTS[prevProvider].baseUrl) {
               this.plugin.settings.baseUrl = defaults.baseUrl;
             }
-            if (!this.plugin.settings.model || this.plugin.settings.model === PROVIDER_DEFAULTS[this.previousProvider() ?? 'local-proxy'].model) {
+            if (!this.plugin.settings.model || this.plugin.settings.model === PROVIDER_DEFAULTS[prevProvider].model) {
               this.plugin.settings.model = defaults.model;
             }
             await this.plugin.saveSettings();
@@ -444,12 +445,5 @@ export class PdfCanvasAiSettingTab extends PluginSettingTab {
       swatch.setCssProps({ '--swatch-color': COLOR_HEX[color] });
       nameEl.prepend(swatch);
     }
-  }
-
-  /** Returns the provider before the current render, for detecting default swaps. */
-  private previousProvider(): AiProvider | null {
-    // We rely on the setting already being saved before display() is called again.
-    // This is used only for the heuristic of whether to swap defaults.
-    return this.plugin.settings.provider;
   }
 }

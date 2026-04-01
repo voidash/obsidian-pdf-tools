@@ -20,6 +20,8 @@ export interface Highlight {
   rects: PageRect[];
   createdAt: number;
   note?: string;
+  /** Vault-relative path to the markdown note file for this annotation */
+  notePath?: string;
 }
 
 export const HIGHLIGHT_COLORS: HighlightColor[] = ['yellow', 'green', 'blue', 'pink', 'red'];

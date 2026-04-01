@@ -63,6 +63,130 @@ interface CanvasApi {
   getViewportCenter?: () => { x: number; y: number };
 }
 
+class PageJumpModal extends Modal {
+  private currentPage: number;
+  private numPages: number;
+  private onNavigate: (page: number) => void;
+
+  constructor(
+    app: Modal['app'],
+    currentPage: number,
+    numPages: number,
+    onNavigate: (page: number) => void,
+  ) {
+    super(app);
+    this.currentPage = currentPage;
+    this.numPages = numPages;
+    this.onNavigate = onNavigate;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.addClass('pcai-page-jump-modal');
+    contentEl.createEl('h3', { text: 'Go to page' });
+
+    const form = contentEl.createEl('form');
+    const row = form.createDiv({ cls: 'pcai-page-jump-row' });
+
+    const input = row.createEl('input', {
+      type: 'number',
+      attr: {
+        min: '1',
+        max: String(this.numPages),
+        value: String(this.currentPage),
+        placeholder: `1–${this.numPages}`,
+      },
+      cls: 'pcai-page-jump-input',
+    });
+
+    row.createSpan({
+      cls: 'pcai-page-jump-total',
+      text: `/ ${this.numPages}`,
+    });
+
+    form.createEl('button', {
+      text: 'Go',
+      cls: 'mod-cta pcai-page-jump-btn',
+      type: 'submit',
+    });
+
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const n = parseInt(input.value, 10);
+      if (!isNaN(n) && n >= 1 && n <= this.numPages) {
+        this.close();
+        this.onNavigate(n);
+      } else {
+        input.addClass('pcai-input-error');
+        setTimeout(() => input.removeClass('pcai-input-error'), 600);
+      }
+    });
+
+    // Also navigate on Enter key directly
+    input.addEventListener('keydown', (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        this.close();
+      }
+    });
+
+    // Focus and select input after modal opens
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
+/** Outline item shape from pdfjs (items is recursive but typed loosely). */
+type OutlineItem = { title?: string; dest?: unknown; items?: OutlineItem[] };
+
+class OutlineModal extends Modal {
+  private outline: OutlineItem[];
+  private onNavigate: (entry: { dest?: unknown }) => void;
+
+  constructor(
+    app: Modal['app'],
+    outline: OutlineItem[],
+    onNavigate: (entry: { dest?: unknown }) => void,
+  ) {
+    super(app);
+    this.outline = outline;
+    this.onNavigate = onNavigate;
+  }
+
+  onOpen(): void {
+    const { contentEl } = this;
+    contentEl.addClass('pcai-outline-modal');
+    contentEl.createEl('h3', { text: 'Outline' });
+
+    const listEl = contentEl.createDiv({ cls: 'pcai-outline-modal-list' });
+    this.renderItems(listEl, this.outline, 0);
+  }
+
+  private renderItems(container: HTMLElement, items: OutlineItem[], depth: number): void {
+    for (const entry of items) {
+      const title = entry.title?.trim() || '(untitled)';
+      const row = container.createDiv({ cls: 'pcai-outline-modal-item' });
+      row.setCssStyles({ paddingLeft: `${12 + depth * 18}px` });
+      row.textContent = title;
+      row.addEventListener('click', () => {
+        this.close();
+        this.onNavigate(entry);
+      });
+
+      if (Array.isArray(entry.items) && entry.items.length > 0) {
+        this.renderItems(container, entry.items as OutlineItem[], depth + 1);
+      }
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 class SpreadOptionsModal extends Modal {
   private onChoose: (direction: SpreadDirection) => void;
 
@@ -172,11 +296,28 @@ export default class PdfCanvasAiPlugin extends Plugin {
       DEFAULT_SETTINGS.colorLabels,
       savedLabels,
     );
+
+    // Migration: fix baseUrl for local-proxy missing /v1 suffix (from older bug)
+    if (
+      this.settings.provider === 'local-proxy' &&
+      this.settings.baseUrl &&
+      !this.settings.baseUrl.endsWith('/v1')
+    ) {
+      this.settings.baseUrl = this.settings.baseUrl.replace(/\/+$/, '') + '/v1';
+    }
   }
 
   async saveSettings(): Promise<void> {
     await this.saveData(this.settings);
     this.aiService?.updateSettings(this.settings);
+
+    // Keep proxy manager in sync and start proxy on demand
+    if (this.proxyManager && this.settings.provider === 'local-proxy') {
+      this.proxyManager.reset(this.settings.baseUrl);
+      void this.proxyManager.ensureRunning().catch((e: unknown) => {
+        console.error('PDF Tools: proxyManager.ensureRunning error', e);
+      });
+    }
   }
 
   // ─── pdfjs worker setup ────────────────────────────────────────────────────
@@ -291,6 +432,43 @@ export default class PdfCanvasAiPlugin extends Plugin {
       if (!file || file.extension !== 'pdf') return;
 
       menu.addSeparator();
+
+      // ── Page navigation ──
+      const renderer = this.canvasInjector.getRendererForNode(node);
+      if (renderer) {
+        const numPages = renderer.getNumPages();
+        const currentPage = renderer.getCurrentVisiblePage();
+        menu.addItem((item) =>
+          item
+            .setTitle(`Go to page\u2026 (${currentPage} / ${numPages})`)
+            .setIcon('hash')
+            .onClick(() => {
+              new PageJumpModal(
+                this.app,
+                currentPage,
+                numPages,
+                (page) => renderer.scrollToPage(page),
+              ).open();
+            }),
+        );
+        const outline = renderer.getOutline();
+        if (outline && outline.length > 0) {
+          menu.addItem((item) =>
+            item
+              .setTitle('Show outline')
+              .setIcon('list')
+              .onClick(() => {
+                new OutlineModal(
+                  this.app,
+                  outline as OutlineItem[],
+                  (entry) => void renderer.navigateToOutlineItem(entry),
+                ).open();
+              }),
+          );
+        }
+        menu.addSeparator();
+      }
+
       menu.addItem((item) =>
         item
           .setTitle('Open in PDF viewer')
@@ -423,6 +601,10 @@ export default class PdfCanvasAiPlugin extends Plugin {
         if (file instanceof TFile && file.extension === 'pdf') {
           this.annotationStore.renameFile(oldPath, file.path);
           this.pdfService.invalidateFile(oldPath);
+        }
+        // Track renames of annotation note files
+        if (file instanceof TFile && file.extension === 'md') {
+          this.annotationStore.renameNoteFile(oldPath, file.path);
         }
       }),
     );

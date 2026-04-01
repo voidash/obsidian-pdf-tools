@@ -41,11 +41,14 @@ export class CanvasInlinePdf {
 
   private pdfDoc: PDFDocumentProxy | null = null;
   private pagesEl!: HTMLElement;
+  private scrollContainerEl!: HTMLElement;
   private selectionMenuEl!: HTMLElement;
   private renderedPages = new Set<number>();
   private pageObserver: IntersectionObserver | null = null;
   private renderTasks = new Map<number, { cancel(): void }>();
   private resizeObserver: ResizeObserver | null = null;
+  private scrollRenderHandler: (() => void) | null = null;
+  private scrollRenderTimer: ReturnType<typeof setTimeout> | null = null;
   private currentScale = 1.0;
   private destroyed = false;
 
@@ -57,6 +60,16 @@ export class CanvasInlinePdf {
   private selectedRects: PageRect[] = [];
   private selectedPageNum = 0;
   private mousedownHandler: ((e: MouseEvent) => void) | null = null;
+
+  // Outline cache
+  private cachedOutline: Array<{ title: string; dest: unknown; items: unknown[] }> | null = null;
+  private outlineLoaded = false;
+
+  // Page indicator strip
+  private pageStripEl: HTMLElement | null = null;
+  private pageInfoEl: HTMLElement | null = null;
+  private outlinePanelEl: HTMLElement | null = null;
+  private scrollTrackTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Interactive mode: double-click to enable scrolling & text selection,
   // click outside or Escape to re-enable node dragging.
@@ -92,7 +105,8 @@ export class CanvasInlinePdf {
     }
 
     // Scrollable container for pages
-    const scrollContainer = this.containerEl.createDiv({ cls: 'pcai-canvas-scroll' });
+    this.scrollContainerEl = this.containerEl.createDiv({ cls: 'pcai-canvas-scroll' });
+    const scrollContainer = this.scrollContainerEl;
     this.pagesEl = scrollContainer.createDiv({ cls: 'pcai-canvas-pages' });
 
     // In interactive mode, stop events from reaching the canvas (prevents drag/pan).
@@ -132,6 +146,21 @@ export class CanvasInlinePdf {
     if (this.destroyed) return;
     this.loadHighlights();
 
+    // Pre-load outline for context menu & outline panel
+    if (this.singlePage === null) {
+      this.pdfDoc.getOutline().then((outline) => {
+        this.cachedOutline = outline;
+        this.outlineLoaded = true;
+      }).catch(() => { /* outline unavailable */ });
+    }
+
+    // Page indicator strip + scroll tracking (multi-page only)
+    if (this.singlePage === null) {
+      this.buildPageStrip();
+      this.setupScrollTracking();
+      this.restoreReadingPosition();
+    }
+
     // Resize handling — recompute scale when node is resized
     this.resizeObserver = new ResizeObserver(() => {
       if (!this.destroyed) this.handleResize();
@@ -151,6 +180,7 @@ export class CanvasInlinePdf {
     if (!this.pdfDoc) return;
 
     this.pageObserver?.disconnect();
+    this.teardownScrollRenderer();
     this.pagesEl.empty();
 
     // Determine which pages to render
@@ -165,22 +195,6 @@ export class CanvasInlinePdf {
       this.currentScale = containerWidth / naturalWidth;
     }
 
-    this.pageObserver = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (!entry.isIntersecting) continue;
-          const num = parseInt(entry.target.getAttribute('data-page') ?? '0', 10);
-          if (num > 0 && !this.renderedPages.has(num)) {
-            this.renderedPages.add(num);
-            this.renderPage(num).catch((e: unknown) => {
-              console.error('PDF Tools — canvas renderPage error:', e);
-            });
-          }
-        }
-      },
-      { root: this.pagesEl.parentElement, rootMargin: '200px', threshold: 0 },
-    );
-
     for (let i = startPage; i <= endPage; i++) {
       const page = await this.pdfDoc.getPage(i);
       const vp = page.getViewport({ scale: this.currentScale });
@@ -190,8 +204,63 @@ export class CanvasInlinePdf {
         attr: { 'data-page': String(i) },
       });
       wrapper.setCssStyles({ width: `${vp.width}px`, height: `${vp.height}px` });
+    }
 
-      this.pageObserver.observe(wrapper);
+    // Use scroll-based visibility check instead of IntersectionObserver.
+    // IntersectionObserver breaks when Obsidian's canvas applies CSS transforms
+    // for zoom, because intersection calculations ignore transforms.
+    this.setupScrollRenderer();
+    this.checkVisiblePages();
+  }
+
+  /**
+   * Scroll-based lazy rendering that works correctly under CSS transforms.
+   * Uses getBoundingClientRect() which accounts for transforms, unlike
+   * IntersectionObserver which does not.
+   */
+  private setupScrollRenderer(): void {
+    this.teardownScrollRenderer();
+    this.scrollRenderHandler = () => {
+      if (this.scrollRenderTimer) clearTimeout(this.scrollRenderTimer);
+      this.scrollRenderTimer = setTimeout(() => this.checkVisiblePages(), 80);
+    };
+    this.scrollContainerEl.addEventListener('scroll', this.scrollRenderHandler);
+  }
+
+  private teardownScrollRenderer(): void {
+    if (this.scrollRenderHandler) {
+      this.scrollContainerEl?.removeEventListener('scroll', this.scrollRenderHandler);
+      this.scrollRenderHandler = null;
+    }
+    if (this.scrollRenderTimer) {
+      clearTimeout(this.scrollRenderTimer);
+      this.scrollRenderTimer = null;
+    }
+  }
+
+  private checkVisiblePages(): void {
+    if (this.destroyed || !this.pdfDoc) return;
+    const containerRect = this.scrollContainerEl.getBoundingClientRect();
+    if (containerRect.width === 0 && containerRect.height === 0) return;
+
+    // Expand the viewport by a margin to pre-render nearby pages
+    const margin = containerRect.height;
+    const top = containerRect.top - margin;
+    const bottom = containerRect.bottom + margin;
+
+    const wrappers = this.pagesEl.querySelectorAll('.pcai-page-wrapper');
+    for (const el of Array.from(wrappers)) {
+      const rect = el.getBoundingClientRect();
+      // Check if this page overlaps the expanded viewport
+      if (rect.bottom >= top && rect.top <= bottom) {
+        const num = parseInt(el.getAttribute('data-page') ?? '0', 10);
+        if (num > 0 && !this.renderedPages.has(num)) {
+          this.renderedPages.add(num);
+          this.renderPage(num).catch((e: unknown) => {
+            console.error('PDF Tools — canvas renderPage error:', e);
+          });
+        }
+      }
     }
   }
 
@@ -257,13 +326,26 @@ export class CanvasInlinePdf {
   private async rerenderAllPages(): Promise<void> {
     if (!this.pdfDoc || this.destroyed) return;
 
+    // Preserve current page before clearing
+    const currentPage = this.getCurrentVisiblePage();
+
     for (const task of this.renderTasks.values()) task.cancel();
     this.renderTasks.clear();
     this.renderedPages.clear();
     this.pageObserver?.disconnect();
+    this.teardownScrollRenderer();
 
     await this.createPagePlaceholders();
     this.loadHighlights();
+
+    // Restore scroll position to the page the user was viewing
+    if (currentPage > 1) {
+      const wrapper = this.pagesEl?.querySelector(`[data-page="${currentPage}"]`);
+      if (wrapper instanceof HTMLElement) {
+        this.scrollContainerEl.scrollTop = wrapper.offsetTop;
+        this.updatePageInfo();
+      }
+    }
   }
 
   // ─── Resize ───────────────────────────────────────────────────────────────
@@ -283,7 +365,11 @@ export class CanvasInlinePdf {
         .then((page) => {
           const naturalWidth = page.getViewport({ scale: 1 }).width;
           const newScale = containerWidth / naturalWidth;
-          if (Math.abs(newScale - this.currentScale) < 0.01) return;
+          if (Math.abs(newScale - this.currentScale) < 0.01) {
+            // Scale unchanged (e.g. canvas zoom) — still check for newly-visible pages
+            this.checkVisiblePages();
+            return;
+          }
           this.currentScale = newScale;
           return this.rerenderAllPages();
         })
@@ -636,6 +722,7 @@ export class CanvasInlinePdf {
       this.enterInteractiveMode();
     };
     this.blockerEl.addEventListener('dblclick', this.blockerDblclickHandler);
+
   }
 
   private enterInteractiveMode(): void {
@@ -708,9 +795,273 @@ export class CanvasInlinePdf {
     return bestPage;
   }
 
+  // ─── Navigation & page strip ────────────────────────────────────────────
+
+  /** Scroll a specific page into view within the canvas PDF. */
+  scrollToPage(pageNum: number): void {
+    const wrapper = this.pagesEl?.querySelector(`[data-page="${pageNum}"]`);
+    if (wrapper instanceof HTMLElement) {
+      this.scrollContainerEl.scrollTo({
+        top: wrapper.offsetTop,
+        behavior: 'smooth',
+      });
+    }
+  }
+
+  /** Returns the cached outline, or null if not loaded or empty. */
+  getOutline(): Array<{ title?: string; dest?: unknown; items?: unknown[] }> | null {
+    return this.cachedOutline;
+  }
+
+  /** Returns total page count. */
+  getNumPages(): number {
+    return this.pdfDoc?.numPages ?? 0;
+  }
+
+  addOutlineItemsToMenu(
+    menu: Menu,
+    items: Array<{ title?: string; dest?: unknown; items?: unknown[] }>,
+    depth: number,
+  ): void {
+    for (const entry of items) {
+      const indent = '\u00A0\u00A0'.repeat(depth);
+      const title = entry.title?.trim() || '(untitled)';
+      menu.addItem((item) =>
+        item
+          .setTitle(`${indent}${title}`)
+          .onClick(() => void this.navigateToOutlineItem(entry)),
+      );
+      if (Array.isArray(entry.items) && entry.items.length > 0) {
+        this.addOutlineItemsToMenu(
+          menu,
+          entry.items as Array<{ title?: string; dest?: unknown; items?: unknown[] }>,
+          depth + 1,
+        );
+      }
+    }
+  }
+
+  async navigateToOutlineItem(entry: { dest?: unknown }): Promise<void> {
+    if (!this.pdfDoc || !entry.dest) return;
+    try {
+      const dest = typeof entry.dest === 'string'
+        ? await this.pdfDoc.getDestination(entry.dest)
+        : entry.dest;
+      if (!dest || !Array.isArray(dest)) return;
+      const pageIdx = await this.pdfDoc.getPageIndex(dest[0]);
+      this.scrollToPage(pageIdx + 1);
+    } catch (err) {
+      console.error('PDF Tools — outline navigation error:', err);
+    }
+  }
+
+  // ─── Page strip (bottom bar with page info + outline toggle) ───────────
+
+  private buildPageStrip(): void {
+    if (!this.pdfDoc || this.singlePage !== null) return;
+    const numPages = this.pdfDoc.numPages;
+
+    this.pageStripEl = this.containerEl.createDiv({ cls: 'pcai-canvas-strip' });
+
+    // Outline toggle button (only if outline exists or will exist)
+    const outlineBtn = this.pageStripEl.createEl('button', {
+      cls: 'pcai-strip-btn',
+      attr: { 'aria-label': 'Outline' },
+    });
+    outlineBtn.textContent = '\u2630'; // ☰ hamburger
+    outlineBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.toggleOutlinePanel();
+    });
+
+    // Page info — clickable to jump
+    this.pageInfoEl = this.pageStripEl.createSpan({
+      cls: 'pcai-strip-page',
+      text: `1 / ${numPages}`,
+    });
+    this.pageInfoEl.addEventListener('click', (e) => {
+      e.stopPropagation();
+      this.showPageJumpInput();
+    });
+
+    // Build the outline panel (hidden) — needs to block events for scrolling
+    this.outlinePanelEl = this.containerEl.createDiv({ cls: 'pcai-canvas-outline pcai-hidden' });
+    this.outlinePanelEl.addEventListener('pointerdown', (e) => e.stopPropagation());
+    this.outlinePanelEl.addEventListener('mousedown', (e) => e.stopPropagation());
+    this.outlinePanelEl.addEventListener('wheel', (e) => e.stopPropagation());
+  }
+
+  private updatePageInfo(): void {
+    if (!this.pageInfoEl || !this.pdfDoc) return;
+    const current = this.getCurrentVisiblePage();
+    this.pageInfoEl.textContent = `${current} / ${this.pdfDoc.numPages}`;
+  }
+
+  private setupScrollTracking(): void {
+    const scrollEl = this.pagesEl?.parentElement;
+    if (!scrollEl) return;
+
+    scrollEl.addEventListener('scroll', () => {
+      if (this.destroyed) return;
+      this.updatePageInfo();
+
+      // Debounce saving reading progress
+      if (this.scrollTrackTimer) clearTimeout(this.scrollTrackTimer);
+      this.scrollTrackTimer = setTimeout(() => {
+        if (this.destroyed || !this.pdfDoc) return;
+        const page = this.getCurrentVisiblePage();
+        this.plugin.annotationStore.updateReadingProgress(
+          this.file.path,
+          page,
+          this.pdfDoc.numPages,
+        );
+      }, 500);
+    });
+  }
+
+  private restoreReadingPosition(): void {
+    if (!this.plugin.settings.resumeLastPage) return;
+    const progress = this.plugin.annotationStore.getReadingProgress(this.file.path);
+    if (progress && progress.lastPage > 1) {
+      // Delay so placeholders are laid out first
+      setTimeout(() => {
+        if (this.destroyed) return;
+        const wrapper = this.pagesEl?.querySelector(`[data-page="${progress.lastPage}"]`);
+        // Use scrollTop directly — scrollIntoView can scroll ancestor elements
+        // (like the canvas viewport) which causes unexpected jumps.
+        if (wrapper instanceof HTMLElement) {
+          this.scrollContainerEl.scrollTop = wrapper.offsetTop;
+          this.updatePageInfo();
+        }
+      }, 150);
+    }
+  }
+
+  private toggleOutlinePanel(): void {
+    if (!this.outlinePanelEl) return;
+
+    const isVisible = !this.outlinePanelEl.hasClass('pcai-hidden');
+    if (isVisible) {
+      this.outlinePanelEl.addClass('pcai-hidden');
+      return;
+    }
+
+    // Populate on first open
+    if (this.outlinePanelEl.childElementCount === 0) {
+      this.populateOutlinePanel();
+    }
+    this.outlinePanelEl.removeClass('pcai-hidden');
+  }
+
+  private populateOutlinePanel(): void {
+    if (!this.outlinePanelEl) return;
+    this.outlinePanelEl.empty();
+
+    if (!this.outlineLoaded || !this.cachedOutline || this.cachedOutline.length === 0) {
+      this.outlinePanelEl.createDiv({
+        cls: 'pcai-outline-empty',
+        text: this.outlineLoaded ? 'No outline available' : 'Loading\u2026',
+      });
+
+      // If not loaded yet, retry once after a short delay
+      if (!this.outlineLoaded) {
+        setTimeout(() => {
+          if (this.destroyed) return;
+          if (this.outlinePanelEl && !this.outlinePanelEl.hasClass('pcai-hidden')) {
+            this.populateOutlinePanel();
+          }
+        }, 1000);
+      }
+      return;
+    }
+
+    this.renderOutlineItems(this.outlinePanelEl, this.cachedOutline, 0);
+  }
+
+  private renderOutlineItems(
+    container: HTMLElement,
+    items: Array<{ title?: string; dest?: unknown; items?: unknown[] }>,
+    depth: number,
+  ): void {
+    for (const entry of items) {
+      const title = entry.title?.trim() || '(untitled)';
+      const row = container.createDiv({ cls: 'pcai-outline-item' });
+      row.style.paddingLeft = `${8 + depth * 14}px`;
+      row.textContent = title;
+      row.addEventListener('click', (e) => {
+        e.stopPropagation();
+        void this.navigateToOutlineItem(entry);
+        this.outlinePanelEl?.addClass('pcai-hidden');
+      });
+
+      if (Array.isArray(entry.items) && entry.items.length > 0) {
+        this.renderOutlineItems(
+          container,
+          entry.items as Array<{ title?: string; dest?: unknown; items?: unknown[] }>,
+          depth + 1,
+        );
+      }
+    }
+  }
+
+  showPageJumpInput(): void {
+    const numPages = this.pdfDoc?.numPages ?? 0;
+    if (numPages === 0) return;
+
+    // Replace page info text with an input
+    if (!this.pageInfoEl) return;
+    const current = String(this.getCurrentVisiblePage());
+
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.min = '1';
+    input.max = String(numPages);
+    input.value = current;
+    input.className = 'pcai-strip-input';
+
+    const originalText = this.pageInfoEl.textContent ?? '';
+    this.pageInfoEl.textContent = '';
+    this.pageInfoEl.appendChild(input);
+
+    const finish = (navigate: boolean) => {
+      if (navigate) {
+        const n = parseInt(input.value, 10);
+        if (!isNaN(n) && n >= 1 && n <= numPages) {
+          this.scrollToPage(n);
+        }
+      }
+      if (this.pageInfoEl) {
+        this.pageInfoEl.textContent = navigate
+          ? `${parseInt(input.value, 10) || 1} / ${numPages}`
+          : originalText;
+      }
+    };
+
+    input.addEventListener('keydown', (e: KeyboardEvent) => {
+      e.stopPropagation();
+      if (e.key === 'Enter') { e.preventDefault(); finish(true); }
+      else if (e.key === 'Escape') { finish(false); }
+    });
+    input.addEventListener('blur', () => finish(false));
+
+    setTimeout(() => { input.focus(); input.select(); }, 0);
+  }
+
   // ─── Cleanup ──────────────────────────────────────────────────────────────
 
   destroy(): void {
+    // Flush any pending reading progress save before tearing down
+    if (this.scrollTrackTimer && this.pdfDoc) {
+      clearTimeout(this.scrollTrackTimer);
+      this.scrollTrackTimer = null;
+      const page = this.getCurrentVisiblePage();
+      this.plugin.annotationStore.updateReadingProgress(
+        this.file.path,
+        page,
+        this.pdfDoc.numPages,
+      );
+    }
+
     this.destroyed = true;
     this.exitInteractiveMode();
     if (this.blockerDblclickHandler && this.blockerEl) {
@@ -719,6 +1070,7 @@ export class CanvasInlinePdf {
     }
     this.resizeObserver?.disconnect();
     this.pageObserver?.disconnect();
+    this.teardownScrollRenderer();
     if (this.resizeTimer) clearTimeout(this.resizeTimer);
     for (const task of this.renderTasks.values()) task.cancel();
     this.renderTasks.clear();

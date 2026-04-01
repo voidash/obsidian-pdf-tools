@@ -575,8 +575,17 @@ export class PdfViewerView extends ItemView {
         });
         textEl.title = h.text;
 
-        // Note (if present)
-        if (h.note) {
+        // Note indicator
+        if (h.notePath) {
+          const noteLink = card.createDiv({ cls: 'pcai-anno-note pcai-anno-note-link' });
+          const basename = h.notePath.split('/').pop()?.replace(/\.md$/, '') ?? h.notePath;
+          noteLink.setText(basename);
+          noteLink.title = 'Open note';
+          noteLink.addEventListener('click', (e) => {
+            e.stopPropagation();
+            void this.editAnnotationNote(h);
+          });
+        } else if (h.note) {
           card.createDiv({ cls: 'pcai-anno-note', text: h.note });
         }
 
@@ -597,11 +606,12 @@ export class PdfViewerView extends ItemView {
           askBtn.addEventListener('click', () => void this.askAboutHighlight(h));
         }
 
+        const hasNote = Boolean(h.notePath || h.note);
         const noteBtn = actions.createEl('button', {
           cls: 'pcai-anno-action',
-          text: h.note ? 'Edit note' : 'Add note',
+          text: hasNote ? 'Open note' : 'Add note',
         });
-        noteBtn.addEventListener('click', () => this.editAnnotationNote(h));
+        noteBtn.addEventListener('click', () => void this.editAnnotationNote(h));
 
         const delBtn = actions.createEl('button', {
           cls: 'pcai-anno-action pcai-anno-action--danger',
@@ -617,35 +627,66 @@ export class PdfViewerView extends ItemView {
     }
   }
 
-  private editAnnotationNote(h: Highlight): void {
-    // Simple prompt-style note editor using a modal-like overlay
-    const overlay = this.containerEl.createDiv('pcai-note-overlay');
-    const dialog = overlay.createDiv('pcai-note-dialog');
-    dialog.createEl('label', { text: 'Annotation note:', cls: 'pcai-note-label' });
+  private async editAnnotationNote(h: Highlight): Promise<void> {
+    // If a note file already exists, open it
+    if (h.notePath) {
+      const existing = this.app.vault.getAbstractFileByPath(h.notePath);
+      if (existing instanceof TFile) {
+        await this.app.workspace.getLeaf('tab').openFile(existing);
+        return;
+      }
+      // File was deleted externally — clear the stale path and fall through
+      this.plugin.annotationStore.updateNotePath(h.id, '');
+    }
 
-    const textarea = dialog.createEl('textarea', {
-      cls: 'pcai-note-textarea',
-      attr: { rows: '4', placeholder: 'Add a note to this annotation\u2026' },
-    });
-    textarea.value = h.note ?? '';
+    // Determine output path: same directory as the PDF
+    const pdfDir = this.currentFile?.parent?.path ?? '';
+    const pdfBasename = this.currentFile?.basename ?? 'PDF';
+    const shortId = h.id.slice(0, 8);
+    const noteFilename = `${pdfBasename} - Note - ${shortId}`;
+    const notePath = pdfDir ? `${pdfDir}/${noteFilename}.md` : `${noteFilename}.md`;
 
-    const btnRow = dialog.createDiv('pcai-note-btn-row');
+    const labels = this.plugin.settings.colorLabels ?? DEFAULT_COLOR_LABELS;
+    const colorLabel = labels[h.color] ?? h.color;
 
-    const cancelBtn = btnRow.createEl('button', { text: 'Cancel' });
-    cancelBtn.addEventListener('click', () => overlay.remove());
+    // If there's an existing inline note (old format), include it as initial content
+    const existingNote = h.note?.trim() ?? '';
 
-    const saveBtn = btnRow.createEl('button', { cls: 'mod-cta', text: 'Save' });
-    saveBtn.addEventListener('click', () => {
-      this.plugin.annotationStore.updateNote(h.id, textarea.value.trim());
-      overlay.remove();
+    const lines: string[] = [
+      '---',
+      `annotation-target: "[[${this.currentFile?.path ?? h.pdfPath}]]"`,
+      `annotation-id: ${h.id}`,
+      `page: ${h.pageNumber}`,
+      `highlight-color: ${h.color}`,
+      `highlight-label: ${colorLabel}`,
+      `created: ${new Date(h.createdAt).toISOString().split('T')[0]}`,
+      '---',
+      '',
+      `> [!quote] Highlight from page ${h.pageNumber}`,
+      `> ${h.text}`,
+      '',
+      '## Note',
+      '',
+    ];
+
+    if (existingNote) {
+      lines.push(existingNote);
+    }
+    lines.push('');
+
+    try {
+      const file = await this.app.vault.create(notePath, lines.join('\n'));
+      this.plugin.annotationStore.updateNotePath(h.id, notePath);
+      // Clear old inline note if it was migrated
+      if (existingNote) {
+        this.plugin.annotationStore.updateNote(h.id, '');
+      }
       this.refreshAnnotations();
-    });
-
-    overlay.addEventListener('click', (e) => {
-      if (e.target === overlay) overlay.remove();
-    });
-
-    textarea.focus();
+      await this.app.workspace.getLeaf('tab').openFile(file);
+    } catch (err) {
+      console.error('PDF Tools: note creation error:', err);
+      new Notice(`Failed to create note: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   private scrollToPage(pageNum: number): void {
@@ -1537,13 +1578,19 @@ export class PdfViewerView extends ItemView {
         const colorLabel = labels[h.color] ?? h.color;
         if (useCallouts) {
           lines.push(`> [!${colorLabel}] ${h.text}`);
-          if (h.note) {
+          if (h.notePath) {
+            const noteBasename = h.notePath.split('/').pop()?.replace(/\.md$/, '') ?? h.notePath;
+            lines.push(`> Note: [[${noteBasename}]]`);
+          } else if (h.note) {
             lines.push(`> *Note: ${h.note}*`);
           }
         } else {
           lines.push(`> ${h.text}`);
           lines.push(`> — **${colorLabel}**`);
-          if (h.note) {
+          if (h.notePath) {
+            const noteBasename = h.notePath.split('/').pop()?.replace(/\.md$/, '') ?? h.notePath;
+            lines.push(`> Note: [[${noteBasename}]]`);
+          } else if (h.note) {
             lines.push(`> *Note: ${h.note}*`);
           }
         }
@@ -1609,7 +1656,21 @@ export class PdfViewerView extends ItemView {
     for (const h of highlights) {
       const colorLabel = labels[h.color] ?? h.color;
       let line = `Page ${h.pageNumber} [${colorLabel}]: "${h.text}"`;
-      if (h.note) line += ` (Note: ${h.note})`;
+      if (h.notePath) {
+        const noteFile = this.app.vault.getAbstractFileByPath(h.notePath);
+        if (noteFile instanceof TFile) {
+          try {
+            const noteContent = await this.app.vault.cachedRead(noteFile);
+            // Strip frontmatter and quote block, keep just the user's note
+            const stripped = noteContent.replace(/^---[\s\S]*?---\s*/, '').replace(/^>.*\n?/gm, '').trim();
+            if (stripped) line += ` (Note: ${stripped})`;
+          } catch {
+            // Ignore read errors
+          }
+        }
+      } else if (h.note) {
+        line += ` (Note: ${h.note})`;
+      }
       annoLines.push(line);
     }
 
@@ -1649,7 +1710,8 @@ export class PdfViewerView extends ItemView {
     const allHighlights = this.plugin.annotationStore.getAllHighlights();
     const matches = allHighlights.filter((h) =>
       h.text.toLowerCase().includes(query) ||
-      (h.note?.toLowerCase().includes(query) ?? false),
+      (h.note?.toLowerCase().includes(query) ?? false) ||
+      (h.notePath?.toLowerCase().includes(query) ?? false),
     );
 
     this.renderCrossPdfSearchResults(matches);
